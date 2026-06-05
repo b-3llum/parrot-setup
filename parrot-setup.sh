@@ -6,7 +6,7 @@
 #   - IppSec's parrot-build Ansible playbook (with known fixes applied)
 #   - C2 Frameworks: AdaptixC2, Havoc, Mythic, Sliver
 #   - Pivoting: Ligolo-ng, Chisel (via playbook)
-#   - AD Tools: Coercer, BloodHound, Certipy, Impacket, NetExec
+#   - AD Tools: Coercer, BloodHound (native CE), Certipy, Impacket, NetExec
 #   - Recon: pspy, PEASS-ng, SecLists, Kerbrute
 #   - Misc: Evil-WinRM, Responder, VS Code + extensions
 #
@@ -18,7 +18,9 @@
 #   - Run as your normal user (NOT root) - script uses sudo where needed
 #   - Requires internet access
 #   - Tested on Parrot OS (Debian trixie-based)
-#   - Services are installed but NOT started - see "Starting Services" at end
+#   - Services are installed but NOT started (except PostgreSQL) - see end of script
+#   - BloodHound is installed NATIVELY (apt package), not via Docker. The
+#     playbook's Docker BloodHound task is disabled before the playbook runs.
 # =============================================================================
 
 set -e
@@ -73,16 +75,18 @@ info "Updating package cache..."
 sudo apt update -y
 
 info "Installing base dependencies..."
+# NOTE: golang-go is required by the C2 builds (Havoc go build, AdaptixC2,
+# Sliver). stderr is intentionally NOT silenced so failures are visible.
 sudo apt install -y \
     git curl wget jq pipx python3-pip python3-venv \
-    build-essential gcc g++ make cmake \
-    ca-certificates gnupg lsb-release \
-    ansible \
-    2>/dev/null
+    build-essential gcc g++ make cmake golang-go \
+    ca-certificates gnupg lsb-release openssl \
+    ansible
 
 # Ensure pipx is on PATH
 export PATH="$HOME/.local/bin:$PATH"
-if ! grep -q 'pipx' "$HOME/.bashrc" 2>/dev/null; then
+# Guard on the exact line we add (.local/bin), otherwise it gets appended every run.
+if ! grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null; then
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
 fi
 
@@ -117,15 +121,11 @@ info "Applying Fix 1: Patching deprecated apt_key usage for Docker GPG key..."
 
 APT_TASKS="roles/install-tools/tasks/apt-stuff.yml"
 if grep -q "apt_key" "$APT_TASKS" 2>/dev/null; then
-    # Find the distribution variable used in the playbook
-    DISTRO_VAR=$(grep -oP 'ansible_distribution_release|distribution' "$APT_TASKS" | head -1)
-    if [ -z "$DISTRO_VAR" ]; then
-        DISTRO_VAR="bookworm"  # fallback
-    fi
-
-    # Get line numbers of the old apt_key and apt_repository tasks
+    # Get line numbers of the old apt_key and apt_repository tasks.
+    # IMPORTANT: scope the end to the FIRST "state: present" at/after the keyring
+    # task, NOT the last one in the file (tail -1 could delete unrelated tasks).
     APT_KEY_START=$(grep -n "Add Docker keyring" "$APT_TASKS" | head -1 | cut -d: -f1)
-    APT_REPO_END=$(grep -n "state: present" "$APT_TASKS" | tail -1 | cut -d: -f1)
+    APT_REPO_END=$(awk -v s="${APT_KEY_START:-0}" 'NR>=s && /state: present/{print NR; exit}' "$APT_TASKS")
 
     if [ -n "$APT_KEY_START" ] && [ -n "$APT_REPO_END" ]; then
         # Find the update_cache line that follows
@@ -159,7 +159,7 @@ if grep -q "apt_key" "$APT_TASKS" 2>/dev/null; then
 \\
 - name: \"Install Docker Repository\"\\
   apt_repository:\\
-    repo: \"deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian {{ distribution }} stable\"\\
+    repo: \"deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable\"\\
     state: present\\
     update_cache: yes\\
   become: true\\
@@ -175,27 +175,31 @@ else
     success "apt_key fix already applied or not needed."
 fi
 
-# --- Fix 2: BloodHound password grep regex ---
-info "Applying Fix 2: Fixing BloodHound password grep regex..."
+# --- Fix 2: Disable the playbook's Docker BloodHound (native install used instead) ---
+info "Applying Fix 2: Disabling the playbook's Docker BloodHound task..."
 
 BH_TASKS="roles/install-tools/tasks/bloodhound.yml"
 if [ -f "$BH_TASKS" ]; then
-    if grep -q '"Password Set To:' "$BH_TASKS"; then
-        sed -i 's/Password Set To:/Initial Password Set To:/' "$BH_TASKS"
-        success "Patched BloodHound password regex."
-    else
-        success "BloodHound regex fix already applied or not needed."
-    fi
+    cat > "$BH_TASKS" <<'YAML'
+---
+# Docker BloodHound install intentionally disabled by parrot-setup.sh.
+# Native BloodHound (apt package) is installed and configured later in this
+# script instead, to avoid running BloodHound inside Docker.
+- name: "BloodHound (Docker) skipped - native install handled by parrot-setup.sh"
+  ansible.builtin.debug:
+    msg: "Skipping Docker BloodHound; native BloodHound is installed separately."
+YAML
+    success "Playbook Docker BloodHound disabled (native install will be used)."
 else
-    warn "bloodhound.yml not found - skipping fix."
+    warn "bloodhound.yml not found - playbook layout may have changed; skipping."
 fi
 
 # --- Run the playbook ---
 info "Running the Ansible playbook..."
-info "This will install: Docker, BloodHound, Chisel, PEASS-ng, Chainsaw,"
-info "SecLists, SharpCollection, Impacket, NetExec, Certipy, Evil-WinRM,"
-info "Kerbrute, Tmux config, Bashrc, Burp Suite CA, Firefox policies,"
-info "UFW + Auditd/Laurel logging, VS Code + extensions, and more."
+info "This will install: Docker, Chisel, PEASS-ng, Chainsaw, SecLists,"
+info "SharpCollection, Impacket, NetExec, Certipy, Evil-WinRM, Kerbrute,"
+info "Tmux config, Bashrc, Burp Suite CA, Firefox policies, UFW + Auditd/Laurel"
+info "logging, VS Code + extensions, and more. (BloodHound is installed natively.)"
 echo ""
 warn "You may be prompted for your sudo password by Ansible."
 echo ""
@@ -206,8 +210,7 @@ ansible-playbook main.yml -K || {
     if [ $ANSIBLE_EXIT -ne 0 ]; then
         warn "Playbook exited with code $ANSIBLE_EXIT."
         warn "Common issues:"
-        warn "  - Neo4j container health check timeout: just re-run the script"
-        warn "  - BloodHound password grab: check if containers are up with 'docker ps'"
+        warn "  - A transient download/health-check failure: just re-run the script"
         warn ""
         warn "You can resume from a failed task with:"
         warn "  cd $PLAYBOOK_DIR && ansible-playbook main.yml -K"
@@ -222,14 +225,71 @@ ansible-playbook main.yml -K || {
 
 success "Ansible playbook completed."
 
-# Save BloodHound password if available
-if sudo docker ps 2>/dev/null | grep -q bloodhound; then
-    BH_PASS=$(sudo docker compose -f /opt/bloodhound/server/docker-compose.yaml logs bloodhound 2>/dev/null | grep -oP 'Initial Password Set To:\s+\K[\S]+' || true)
-    if [ -n "$BH_PASS" ]; then
-        echo -e "username: admin\npassword: $BH_PASS" | sudo tee /opt/bloodhound/server/initial-password.txt > /dev/null
-        success "BloodHound password saved to /opt/bloodhound/server/initial-password.txt"
+# Return to a stable working directory before the remaining phases.
+cd "$HOME"
+
+# =============================================================================
+# Native BloodHound CE (replaces the Docker stack)
+# =============================================================================
+section "Native BloodHound CE"
+
+CYPHER="/usr/share/neo4j/bin/cypher-shell"
+
+info "Installing native BloodHound, the Python ingestor, and neo4j..."
+sudo apt install -y bloodhound bloodhound.py neo4j
+
+# Internal neo4j password (bhapi <-> neo4j, bound to loopback only).
+NEO4J_PASS=$(openssl rand -hex 16)
+
+info "Preparing PostgreSQL + BloodHound database..."
+sudo systemctl enable --now postgresql
+sudo runuser -u postgres -- /usr/share/bloodhound/create-database-bloodhound
+
+# Set the neo4j password to $NEO4J_PASS. Resilient to an already-initialised
+# DB: neo4j-admin can't be used on this box (the system JDK is too new for
+# neo4j 4.4 -> "Unrecognized VM option 'UseBiasedLocking'"), so we change the
+# password over bolt, and if neo4j was already set up with an unknown password
+# we reset the system database (users/roles only - the empty graph DB is
+# untouched) and retry against the default neo4j/neo4j.
+set_neo4j_password() {
+    sudo neo4j start >/dev/null 2>&1 || true
+    info "  Waiting for neo4j to accept connections..."
+    for _ in $(seq 1 40); do curl -s http://localhost:7474 >/dev/null 2>&1 && break; sleep 3; done
+
+    if "$CYPHER" -a neo4j://localhost:7687 -u neo4j -p neo4j -d system \
+        "ALTER CURRENT USER SET PASSWORD FROM 'neo4j' TO '$NEO4J_PASS';" >/dev/null 2>&1; then
+        return 0
     fi
+
+    warn "  neo4j already initialised - resetting auth (system DB only)..."
+    sudo neo4j stop >/dev/null 2>&1 || true
+    sudo rm -rf /etc/neo4j/data/databases/system /etc/neo4j/data/transactions/system
+    sudo neo4j start >/dev/null 2>&1 || true
+    for _ in $(seq 1 40); do curl -s http://localhost:7474 >/dev/null 2>&1 && break; sleep 3; done
+    "$CYPHER" -a neo4j://localhost:7687 -u neo4j -p neo4j -d system \
+        "ALTER CURRENT USER SET PASSWORD FROM 'neo4j' TO '$NEO4J_PASS';" >/dev/null 2>&1
+}
+
+info "Setting neo4j password..."
+if set_neo4j_password && \
+   "$CYPHER" -a neo4j://localhost:7687 -u neo4j -p "$NEO4J_PASS" "RETURN 1;" >/dev/null 2>&1; then
+    success "neo4j password configured."
+else
+    warn "Could not set the neo4j password automatically."
+    warn "Set it manually (cypher-shell) and update /etc/bhapi/bhapi.json before running bloodhound."
 fi
+
+# Point bhapi at the neo4j password. The launcher refuses to start while the
+# config still has the default neo4j secret ("secret": "neo4j").
+info "Updating /etc/bhapi/bhapi.json with the neo4j password..."
+sudo sed -i "s/\"secret\": \"neo4j\"/\"secret\": \"$NEO4J_PASS\"/" /etc/bhapi/bhapi.json
+
+# Honour the "installed but not started" contract - free the RAM until needed.
+sudo neo4j stop >/dev/null 2>&1 || true
+
+success "Native BloodHound installed and configured."
+info "  Start it with: sudo bloodhound"
+info "  UI: http://127.0.0.1:8080  (login admin/admin; first run builds ~230 neo4j indexes, ~5 min)"
 
 # =============================================================================
 # PHASE 3: C2 Frameworks
@@ -290,10 +350,14 @@ fi
 info "Checking Sliver..."
 if ! command -v sliver-server &>/dev/null; then
     info "Installing Sliver C2..."
-    curl -s https://sliver.sh/install | sudo bash 2>&1 | tail -5
+    # Download first (curl -f fails on HTTP errors so we never pipe a bad
+    # response straight into root's shell), then run. Inspect the file if desired.
+    curl -fsSL https://sliver.sh/install -o /tmp/sliver-install.sh
+    sudo bash /tmp/sliver-install.sh 2>&1 | tail -5
+    rm -f /tmp/sliver-install.sh
     success "Sliver installed."
 else
-    success "Sliver already installed: $(which sliver-server)"
+    success "Sliver already installed: $(command -v sliver-server)"
 fi
 
 # =============================================================================
@@ -305,14 +369,19 @@ section "Phase 4: Pivoting & Tunneling"
 info "Installing Ligolo-ng..."
 if [ ! -f "/opt/ligolo-ng/proxy" ]; then
     sudo mkdir -p /opt/ligolo-ng
-    LIGOLO_VER=$(curl -sI https://github.com/nicocha30/ligolo-ng/releases/latest | grep -i location | sed 's/.*tag\///;s/\r//')
-    info "  Latest version: $LIGOLO_VER"
-    sudo curl -sL "https://github.com/nicocha30/ligolo-ng/releases/download/${LIGOLO_VER}/ligolo-ng_proxy_${LIGOLO_VER#v}_linux_amd64.tar.gz" -o /tmp/ligolo-proxy.tar.gz
-    sudo curl -sL "https://github.com/nicocha30/ligolo-ng/releases/download/${LIGOLO_VER}/ligolo-ng_agent_${LIGOLO_VER#v}_linux_amd64.tar.gz" -o /tmp/ligolo-agent.tar.gz
-    sudo tar xzf /tmp/ligolo-proxy.tar.gz -C /opt/ligolo-ng/
-    sudo tar xzf /tmp/ligolo-agent.tar.gz -C /opt/ligolo-ng/
-    rm -f /tmp/ligolo-proxy.tar.gz /tmp/ligolo-agent.tar.gz
-    success "Ligolo-ng installed at /opt/ligolo-ng/"
+    LIGOLO_VER=$(curl -sI https://github.com/nicocha30/ligolo-ng/releases/latest | grep -i location | sed 's/.*tag\///;s/\r//' || true)
+    if [ -z "$LIGOLO_VER" ]; then
+        fail "Could not resolve the latest Ligolo-ng version (GitHub redirect format may have changed)."
+        warn "Skipping Ligolo-ng - install it manually from https://github.com/nicocha30/ligolo-ng/releases"
+    else
+        info "  Latest version: $LIGOLO_VER"
+        sudo curl -sL "https://github.com/nicocha30/ligolo-ng/releases/download/${LIGOLO_VER}/ligolo-ng_proxy_${LIGOLO_VER#v}_linux_amd64.tar.gz" -o /tmp/ligolo-proxy.tar.gz
+        sudo curl -sL "https://github.com/nicocha30/ligolo-ng/releases/download/${LIGOLO_VER}/ligolo-ng_agent_${LIGOLO_VER#v}_linux_amd64.tar.gz" -o /tmp/ligolo-agent.tar.gz
+        sudo tar xzf /tmp/ligolo-proxy.tar.gz -C /opt/ligolo-ng/
+        sudo tar xzf /tmp/ligolo-agent.tar.gz -C /opt/ligolo-ng/
+        rm -f /tmp/ligolo-proxy.tar.gz /tmp/ligolo-agent.tar.gz
+        success "Ligolo-ng installed at /opt/ligolo-ng/"
+    fi
 else
     success "Ligolo-ng already installed."
 fi
@@ -361,10 +430,10 @@ check_tool() {
     local check="$2"
     if eval "$check" &>/dev/null; then
         success "$name"
-        ((PASS++))
+        PASS=$((PASS + 1))
     else
         fail "$name - NOT FOUND"
-        ((FAIL++))
+        FAIL=$((FAIL + 1))
     fi
 }
 
@@ -377,7 +446,6 @@ check_tool "Docker"            "command -v docker"
 check_tool "Impacket"          "pipx list 2>/dev/null | grep -q impacket"
 check_tool "NetExec"           "pipx list 2>/dev/null | grep -q netexec"
 check_tool "Certipy"           "pipx list 2>/dev/null | grep -q certipy"
-check_tool "BloodHound Python" "pipx list 2>/dev/null | grep -q bloodhound"
 check_tool "Evil-WinRM"        "command -v evil-winrm"
 check_tool "Chisel"            "ls /opt/chisel/chisel* 2>/dev/null"
 check_tool "PEASS-ng"          "ls /opt/peas/linpeas.sh 2>/dev/null"
@@ -386,6 +454,11 @@ check_tool "SharpCollection"   "ls /opt/SharpCollection/README.md 2>/dev/null"
 check_tool "Chainsaw"          "ls /opt/chainsaw* 2>/dev/null"
 check_tool "VS Code"           "command -v code"
 check_tool "Responder"         "command -v responder"
+
+# Native BloodHound
+check_tool "BloodHound (native)"  "command -v bloodhound"
+check_tool "neo4j"                "command -v neo4j"
+check_tool "BloodHound Python"    "command -v bloodhound-python"
 
 # C2 Frameworks
 check_tool "AdaptixC2"         "ls /opt/AdaptixC2/dist/adaptixserver 2>/dev/null"
@@ -418,11 +491,6 @@ cat > "$CREDS_FILE" << 'CREDS'
 # =============================================================================
 # Red Team Credentials & Quick Reference
 # =============================================================================
-
-## BloodHound
-# Check: sudo cat /opt/bloodhound/server/initial-password.txt
-# Web UI: http://localhost:8088
-# Start: cd /opt/bloodhound/server && sudo docker compose up -d
 
 ## Mythic
 # Creds: cd /opt/Mythic && cat .env | grep MYTHIC_ADMIN
@@ -463,12 +531,22 @@ cat > "$CREDS_FILE" << 'CREDS'
 
 CREDS
 
+# BloodHound (native) - appended separately so the generated neo4j password is included.
+cat >> "$CREDS_FILE" << EOF
+## BloodHound (native CE)
+# Web UI: http://127.0.0.1:8080    login: admin / admin  (forces a password change on first login)
+# Start:  sudo bloodhound           (first run builds ~230 neo4j indexes, ~5 min)
+# neo4j:  neo4j / $NEO4J_PASS        (bolt localhost:7687)
+# Config: /etc/bhapi/bhapi.json
+
+EOF
+
 success "Credentials & quick reference saved to: $CREDS_FILE"
 echo ""
-info "Services are installed but NOT running."
+info "Services are installed but NOT running (PostgreSQL is enabled for BloodHound)."
 info "Start them individually as needed using the commands in $CREDS_FILE"
 echo ""
-warn "Remember to stop BloodHound's containers before starting Mythic"
-warn "if you're low on RAM - they both use PostgreSQL."
+warn "Native BloodHound (neo4j + bhapi) and Mythic are both RAM-hungry."
+warn "Stop BloodHound's neo4j ('sudo neo4j stop') before starting Mythic if low on RAM."
 echo ""
 success "Your Parrot OS red team workstation is ready!"
