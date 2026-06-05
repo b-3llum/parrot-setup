@@ -6,8 +6,7 @@ Automated setup script for a fully-loaded Parrot OS red team workstation. Builds
 
 ### Via IppSec's Playbook (with fixes applied)
 - **Docker** (modern GPG key method for Parrot/Debian trixie)
-- **BloodHound CE** + Neo4j (fixed password regex)
-- **Impacket**, **NetExec**, **Certipy**, **BloodHound Python ingestor** (via pipx)
+- **Impacket**, **NetExec**, **Certipy** (via pipx)
 - **Evil-WinRM** (via gem)
 - **Chisel**, **PEASS-ng** (linpeas/winPEAS), **Chainsaw**
 - **SecLists**, **SharpCollection**, **Kerbrute**
@@ -18,6 +17,7 @@ Automated setup script for a fully-loaded Parrot OS red team workstation. Builds
 - **NOPASSWD sudo** for your user
 
 ### Additional Tools (installed by this script)
+- **BloodHound CE (native)** + **neo4j** + **bloodhound.py** ingestor - installed from the `bloodhound` apt package and configured (PostgreSQL DB + neo4j password wired into `/etc/bhapi/bhapi.json`). No Docker; UI on `http://127.0.0.1:8080`.
 - **AdaptixC2** - Modular red team C2 framework (Go server + extensions)
 - **Havoc** - Evasion-focused C2 with Demon agent
 - **Mythic** - Web-based C2 with plugin architecture (Docker)
@@ -44,17 +44,17 @@ The script automatically patches these known issues in IppSec's playbook:
 
 1. **`apt-key` removed from Parrot OS** - The playbook uses the deprecated `apt_key` module, but Parrot (Debian trixie) removed the `apt-key` binary entirely. Fixed by using the modern `signed-by` GPG keyring method.
 
-2. **BloodHound password regex mismatch** - The grep regex matches `Password Set To:` but the actual BloodHound log format is `Initial Password Set To:`. Fixed in the playbook before execution.
+2. **Docker BloodHound replaced with native** - The playbook installs BloodHound inside Docker. This script disables that task (`roles/install-tools/tasks/bloodhound.yml`) and installs the native `bloodhound` apt package instead, configuring PostgreSQL + neo4j and writing the neo4j password into `/etc/bhapi/bhapi.json`.
 
-3. **Neo4j container health check timeout** - Neo4j 4.4 takes ~50 seconds to initialize on first run, exceeding Docker's health check. If this happens, just re-run the script.
+3. **First BloodHound launch is slow** - On the first `sudo bloodhound`, the native server builds ~230 neo4j indexes (~5 minutes) before the UI on `:8080` responds. This is normal; later starts are quick.
 
 ## Starting Services
 
 Services are installed but **not started** by default. Start them individually:
 
 ```bash
-# BloodHound
-cd /opt/bloodhound/server && sudo docker compose up -d
+# BloodHound (native)
+sudo bloodhound          # UI: http://127.0.0.1:8080  (login admin/admin, first run ~5 min)
 
 # Mythic
 cd /opt/Mythic && sudo ./mythic-cli start
@@ -84,7 +84,7 @@ After setup, credentials are saved to `~/red-team-creds.txt`. Key ones:
 
 | Service | Location |
 |---------|----------|
-| BloodHound | `sudo cat /opt/bloodhound/server/initial-password.txt` |
+| BloodHound | `http://127.0.0.1:8080` - login `admin` / `admin` (neo4j password saved in `~/red-team-creds.txt`) |
 | Mythic | `cd /opt/Mythic && cat .env \| grep MYTHIC_ADMIN` |
 | AdaptixC2 | `cat /opt/AdaptixC2/dist/profile.yaml` |
 | Havoc | `cat /opt/Havoc/profiles/havoc.yaotl` |
